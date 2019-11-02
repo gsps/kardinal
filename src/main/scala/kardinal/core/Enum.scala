@@ -164,7 +164,7 @@ trait EnumOps[T1] { self: Enum[T1] =>
   def map[U](f: T1 => U): Enum[U] = Map(this, f)
   // def filter(f: T1 => Boolean): Enum[T1] = Filter(this, f)
   def bind[U](ed: Depend[T1, U]): Enum[U] = Bind(this, ed)
-  def flatMapFinite[U](f: T1 => Enum[U]): Enum[U] = Bind(this, lift(true)(f))
+  def flatMapFinite[U](f: T1 => Enum[U]): Enum[U] = Bind(this, dsl.lift(true)(f))
 }
 
 // class DependOps[V, T1](ed1: Depend[V, T1]) {
