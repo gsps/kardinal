@@ -7,6 +7,8 @@ sealed trait Enum[T] extends EnumOps[T] {
   def hasDefiniteSize: Boolean
   def size: Size
 
+  def indexTree(index: Index): IndexTree
+
   // def infiniteIterator: Iterator[T] =
   //   Iterator.from(0).map(apply)
   // def iterator: Iterator[T] =
@@ -49,6 +51,7 @@ class EnumIterator[T](private val enum: Enum[T], private var index: Index) exten
     }
 }
 
+
 case class Sum[T](e1: Enum[T], e2: Enum[T]) extends Enum[T] {
   val pairing: Pairing = SumPairing(e1, e2)
   def apply(index: Index) = {
@@ -59,6 +62,12 @@ case class Sum[T](e1: Enum[T], e2: Enum[T]) extends Enum[T] {
   }
   val hasDefiniteSize = e1.hasDefiniteSize && e2.hasDefiniteSize
   lazy val size = e1.size + e2.size
+
+  def indexTree(index: Index): IndexTree = {
+    val (eIndex, vIndex) = pairing.decompose(index)
+    val vTree = if (eIndex == 0) e1.indexTree(vIndex) else e2.indexTree(vIndex)
+    Decomposed(pairing, AtomicIndex(eIndex), vTree)
+  }
 }
 
 case class Product[T1, T2](e1: Enum[T1], e2: Enum[T2]) extends Enum[(T1, T2)] {
@@ -70,6 +79,11 @@ case class Product[T1, T2](e1: Enum[T1], e2: Enum[T2]) extends Enum[(T1, T2)] {
   }
   val hasDefiniteSize = e1.hasDefiniteSize && e2.hasDefiniteSize
   lazy val size = e1.size * e2.size
+
+  def indexTree(index: Index): IndexTree = {
+    val (index1, index2) = pairing.decompose(index)
+    Decomposed(pairing, e1.indexTree(index1), e2.indexTree(index2))
+  }
 }
 
 case class Map[S, T](e: Enum[S], f: S => T) extends Enum[T] {
@@ -79,6 +93,8 @@ case class Map[S, T](e: Enum[S], f: S => T) extends Enum[T] {
   }
   def hasDefiniteSize = e.hasDefiniteSize
   def size = e.size
+
+  def indexTree(index: Index): IndexTree = e.indexTree(index)
 }
 
 // case class Filter[T](e: Enum[T], f: T => Boolean) extends Enum[T]
@@ -109,6 +125,12 @@ case class Bind[V, T](e: Enum[V], ed: Depend[V, T]) extends Enum[T] {
     // val sum = innerSizesSeq.sum
     // println(s"BIND e.size:${e.size}, innerSizes: $innerSizesSeq = $sum")
     // sum
+  }
+
+  def indexTree(index: Index): IndexTree = {
+    val (index1, index2) = pairing.decompose(index)
+    val v = e(index1)
+    Decomposed(pairing, e.indexTree(index1), ed(v).indexTree(index2))
   }
 }
 
@@ -148,12 +170,16 @@ case class SingletonAtomicEnum[T](value: T) extends Enum[T] {
     if (index == 0) value else throw EnumerationException(this, index)
   val hasDefiniteSize = true
   val size: Size = 1
+
+  def indexTree(index: Index): IndexTree = AtomicIndex(index)
 }
 case class RangeAtomicEnum(range: Range) extends Enum[Int] {
   def apply(index: Index): Int =
     if (index < size) range(index.toInt) else throw EnumerationException(this, index)
   val hasDefiniteSize = true
   val size: Size = range.size
+
+  def indexTree(index: Index): IndexTree = AtomicIndex(index)
 }
 
 // == DSL helpers ==
