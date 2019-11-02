@@ -2,7 +2,7 @@ package kardinal.core
 
 // == First-order enumerators ==
 
-sealed trait Enum[T] {
+sealed trait Enum[T] extends EnumOps[T] {
   def apply(index: Index): T
   def hasDefiniteSize: Boolean
   def size: Size
@@ -158,26 +158,27 @@ case class RangeAtomicEnum(range: Range) extends Enum[Int] {
 
 // == DSL helpers ==
 
+trait EnumOps[T1] { self: Enum[T1] =>
+  def +(e2: Enum[T1]): Enum[T1] = Sum(this, e2)
+  def *[T2](e2: Enum[T2]): Enum[(T1, T2)] = Product(this, e2)
+  def map[U](f: T1 => U): Enum[U] = Map(this, f)
+  // def filter(f: T1 => Boolean): Enum[T1] = Filter(this, f)
+  def bind[U](ed: Depend[T1, U]): Enum[U] = Bind(this, ed)
+  def flatMapFinite[U](f: T1 => Enum[U]): Enum[U] = Bind(this, lift(true)(f))
+}
+
+// class DependOps[V, T1](ed1: Depend[V, T1]) {
+//   def +(ed2: Depend[V, T1]): Depend[V, T1] = DSum(ed1, ed2)
+//   def *[T2](ed2: Depend[V, T2]): Depend[V, (T1, T2)] = DProduct(ed1, ed2)
+//   def map[U](f: U => V): Depend[U, T1] = DMap(ed1, f)
+// }
+
 object dsl {
-  implicit class EnumOps[T1](e1: Enum[T1]) {
-    def +(e2: Enum[T1]): Enum[T1] = Sum(e1, e2)
-    def *[T2](e2: Enum[T2]): Enum[(T1, T2)] = Product(e1, e2)
-    def map[U](f: T1 => U): Enum[U] = Map(e1, f)
-    // def filter(f: T1 => Boolean): Enum[T1] = Filter(e1, f)
-    def bind[U](ed: Depend[T1, U]): Enum[U] = Bind(e1, ed)
-  }
-
-  implicit class DependOps[V, T1](ed1: Depend[V, T1]) {
-    // def +(ed2: Depend[V, T1]): Depend[V, T1] = DSum(ed1, ed2)
-    // def *[T2](ed2: Depend[V, T2]): Depend[V, (T1, T2)] = DProduct(ed1, ed2)
-    // def map[U](f: U => V): Depend[U, T1] = DMap(ed1, f)
-  }
-
   def lift[V, T](allInnerFinite: Boolean)(f: V => Enum[T]): Depend[V, T] =
     DLift(allInnerFinite, f)
   def rec[V, T](allInnerFinite: Boolean)(f: (V, Depend[V, T]) => Enum[T]): Depend[V, T] =
     DRec(allInnerFinite, f)
 
-  def enumFromSingleton[T](value: T): Enum[T] = SingletonAtomicEnum(value)
-  def enumFromRange(range: Range): Enum[Int] = RangeAtomicEnum(range)
+  implicit def enumFromSingleton[T](value: T): Enum[T] = SingletonAtomicEnum(value)
+  implicit def enumFromRange(range: Range): Enum[Int] = RangeAtomicEnum(range)
 }
