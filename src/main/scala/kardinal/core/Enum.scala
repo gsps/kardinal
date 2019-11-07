@@ -9,22 +9,17 @@ sealed trait Enum[T] extends EnumOps[T] {
 
   def indexTree(index: Index): IndexTree
 
-  // def infiniteIterator: Iterator[T] =
-  //   Iterator.from(0).map(apply)
-  // def iterator: Iterator[T] =
-  //   if (hasDefiniteSize) Iterator.range(0, size).map(apply) else infiniteIterator
   def iterator: Iterator[T] = new EnumIterator(this, 0)
 
-  def checkIndex(index: Index) = {}
-  // def checkIndex(index: Index) =
-  //   assert(0 <= index && !hasDefiniteSize || index < size,
-  //     s"Index out-of-bounds: $index not in [0, $size[")
+  def checkIndex(index: Index) = {
+    // assert(0 <= index && !hasDefiniteSize || index < size,
+    //   s"Index out-of-bounds: $index not in [0, $size[")
+  }
 }
 
 case class EnumerationException[T](enum: Enum[T], index: Index)
     extends Exception(
-      s"Index out-of-bounds: $index / ${if (enum.hasDefiniteSize) enum.size.toString
-      else "???"}",
+      s"Index out-of-bounds: $index / ${if (enum.hasDefiniteSize) enum.size.toString else "???"}",
       null
     )
 
@@ -50,7 +45,6 @@ class EnumIterator[T](private val enum: Enum[T], private var index: Index) exten
       throw new NoSuchElementException()
     }
 }
-
 
 case class Sum[T](e1: Enum[T], e2: Enum[T]) extends Enum[T] {
   val pairing: Pairing = SumPairing(e1, e2)
@@ -121,10 +115,6 @@ case class Bind[V, T](e: Enum[V], ed: Depend[V, T]) extends Enum[T] {
   lazy val size: Size = {
     assert(hasDefiniteSize)
     innerSizes.sum
-    // val innerSizesSeq = innerSizes.toSeq
-    // val sum = innerSizesSeq.sum
-    // println(s"BIND e.size:${e.size}, innerSizes: $innerSizesSeq = $sum")
-    // sum
   }
 
   def indexTree(index: Index): IndexTree = {
