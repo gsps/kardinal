@@ -1,6 +1,6 @@
 package kardinal.examples
 
-import kardinal.core._
+import kardinal.core.{Map => _, _}
 import kardinal.core.dsl._
 
 object Lambda {
@@ -58,6 +58,8 @@ object Lambda {
   type InferResult = (Env, TyVarIndex, TypedTerm, Type)
   object UnificationException extends Exception
 
+  val MaxNesting = 16
+
   sealed trait Type {
     import scala.collection.immutable.Map
     private def makeNames(): Map[TyVarIndex, String] = {
@@ -86,21 +88,63 @@ object Lambda {
       if ((this.tpe1 ne tpe1) || (this.tpe2 ne tpe2)) Arrow(tpe1, tpe2) else this
   }
 
-  def subst(from: TyVarIndex, to: Type, tpe: Type): Type =
-    tpe match {
-      case TyVar(`from`)           => to
-      case tpe @ TyVar(_)          => tpe
-      case tpe @ Arrow(tpe1, tpe2) => tpe.copy(subst(from, to, tpe1), subst(from, to, tpe2))
+  /*
+  type Subst = Array[Type]
+  object Subst {
+    private val identityTemplate: Subst = Array.fill(MaxNesting)(null)
+    def identity = identityTemplate.clone
+
+    def singleton(from: TyVarIndex, to: Type): Subst = {
+      val s = identity
+      s(from) = to
+      s
     }
 
-  def subst(from: TyVarIndex, to: Type, env: Env): Env =
-    env match {
-      case Nil => env
-      case tpe :: envRest =>
-        val tpeSubst = subst(from, to, tpe)
-        val envRestSubst = subst(from, to, envRest)
-        if ((tpeSubst ne tpe) || (envRestSubst ne envRest)) tpeSubst :: envRestSubst else env
+    def apply(s: Subst, tpe: Type): Type =
+      tpe match {
+        case TyVar(tv) =>
+          val to = s(tv)
+          if (to ne null) to else tpe
+        case tpe @ Arrow(tpe1, tpe2) =>
+          tpe.copy(apply(s, tpe1), apply(s, tpe2))
+      }
+
+    def compose(s1: Subst, s2: Subst): Type = {
+      val s: Subst = s2.clone
+      for (i <- 0 until MaxNesting) {
+        var tpe = s2(i)
+        if (tpe eq null)
+          tpe = TyVar(i)
+        s(i) = subst(s1, tpe)
+      }
+      s
     }
+
+    def extend(from: TyVarIndex, to: Type, s: Subst): Subst =
+      compose(singleton(from, to), s)
+  }
+  implicit class SubstOps(subst: Subst) {
+    def apply(tpe: Type): Type = Subst.apply(subst, tpe)
+    def compose(other: Subst): Subst = Subst.compose(subst, other)
+  }
+   */
+
+  case class Subst(pairs: Map[TyVarIndex, Type]) {
+    def apply(tv: TyVarIndex): Type = pairs.getOrElse(tv, TyVar(tv))
+    def apply(tpe: Type): Type =
+      tpe match {
+        case TyVar(tv)               => pairs.getOrElse(tv, tpe)
+        case tpe @ Arrow(tpe1, tpe2) => tpe.copy(apply(tpe1), apply(tpe2))
+      }
+    def compose(other: Subst): Subst =
+      Subst(this.pairs ++ other.pairs.view.mapValues(apply))
+    def drop(tv: TyVarIndex): Subst =
+      Subst(pairs - tv)
+  }
+  object Subst {
+    val identity = Subst(Map.empty)
+    def singleton(from: TyVarIndex, to: Type) = Subst(Map(from -> to))
+  }
 
   def occurs(tv: TyVarIndex, tpe: Type): Boolean =
     tpe match {
@@ -110,18 +154,21 @@ object Lambda {
     }
 
   // TODO: Speed-up occurs check by caching?
-  def unify(env: Env, tpe1: Type, tpe2: Type): (Env, Type) =
+  def unifier(tpe1: Type, tpe2: Type): Subst =
     (tpe1, tpe2) match {
       case (TyVar(tv1), TyVar(tv2)) if tv1 == tv2 =>
-        (env, tpe2)
-      case (TyVar(tv1), tpe2) =>
-        if (occurs(tv1, tpe2)) throw UnificationException else (subst(tv1, tpe2, env), tpe2)
+        Subst.identity
       case (tpe1, TyVar(tv2)) =>
-        if (occurs(tv2, tpe1)) throw UnificationException else (subst(tv2, tpe1, env), tpe1)
+        if (occurs(tv2, tpe1)) throw UnificationException else Subst.singleton(tv2, tpe1)
+      case (TyVar(tv1), tpe2) =>
+        if (occurs(tv1, tpe2)) throw UnificationException else Subst.singleton(tv1, tpe2)
       case (Arrow(tpe1S, tpe1T), tpe2 @ Arrow(tpe2S, tpe2T)) =>
-        val (newEnv1, tpeS) = unify(env, tpe1S, tpe2S)
-        val (newEnv2, tpeT) = unify(newEnv1, tpe1T, tpe2T)
-        (newEnv2, tpe2.copy(tpeS, tpeT))
+        unifier(tpe1S, tpe2S) compose unifier(tpe1T, tpe2T)
+    }
+
+  def merge(s1: Subst, s2: Subst): Subst =
+    (s1.pairs.keySet union s2.pairs.keySet).foldLeft(s1) {
+      case (s, tv) => unifier(s1(tv), s2(tv)) compose s
     }
 
   private var debugDepth: Int = 1
@@ -135,48 +182,44 @@ object Lambda {
     res
   }
 
-  def infer(env: Env, nextTv: TyVarIndex, t: Term, expected: Type): InferResult =
-    debug(s"\n${debugPre}Infer $env  |-($nextTv)  $t  :  $expected")
-    {
-      t match {
-        case Var(v) =>
-          val (newEnv, tpe) = unify(env, env(v), expected)
-          (newEnv, nextTv, TypedVar(v), tpe)
-        case Abs(t) =>
-          val (innerEnv, innerNextTv, tt, innerTpe) = expected match {
-            case Arrow(tpe1, tpe2) =>
-              infer(tpe1 :: env, nextTv, t, tpe2)
-            case TyVar(_) =>
-              val tpeS = TyVar(nextTv)
-              val tpeT = TyVar(nextTv + 1)
-              val (newEnv, Arrow(newTpeS, newTpeT)) = unify(env, Arrow(tpeS, tpeT), expected)
-              assert((tpeS eq newTpeS) && (tpeT eq newTpeT))
-              infer(newTpeS :: newEnv, nextTv + 2, t, newTpeT)
-          }
-          (innerEnv.tail, innerNextTv, TypedAbs(innerEnv.head, tt), Arrow(innerEnv.head, innerTpe))
-        case App(t1, t2) =>
-          val tpeS = TyVar(nextTv)
+  private var _nextTv: Int = MaxNesting
+  private def freshTv(): TyVar = {
+    val t = TyVar(_nextTv)
+    _nextTv += 1
+    t
+  }
 
-          // val (newEnv1, nextTv1, tt2, newTpeS) = infer(env, nextTv + 1, t2, tpeS)
-          // val (newEnv2, nextTv2, tt1, Arrow(_, tpe)) =
-          //   infer(newEnv1, nextTv1, t1, Arrow(newTpeS, expected))  // FIXME: expected not unified with changes in first infer!
-          // (newEnv2, nextTv2, TypedApp(tt1, tt2), tpe)
-
-          // val (newEnv1, nextTv1, tt1, Arrow(newTpeS1, tpeT)) =
-          //   infer(env, nextTv + 1, t1, Arrow(tpeS, expected))
-          // val (newEnv2, nextTv2, tt2, newTpeS2) = infer(newEnv1, nextTv1, t2, newTpeS1)
-          // (newEnv2, nextTv2, TypedApp(tt1, tt2), tpe)
-
-          // ???
-          val (newEnv1, nextTv1, tt2, newTpeS) = infer(env, nextTv + 1, t2, tpeS)
-          val (newEnv2, nextTv2, tt1, Arrow(_, tpe)) =
-            infer(newEnv1, nextTv1, t1, Arrow(newTpeS, expected))  // FIXME: expected not unified with changes in first infer!
-          (newEnv2, nextTv2, TypedApp(tt1, tt2), tpe)
-      }
+  // // `n` is the number of free variables, the implicit environment is one where each variable
+  // // has as its type `TyVar(i)` where `i` corresponds to the relative depth of its binding.
+  // Note that `env` is simple here, in the sense that each variable is of a distinct type variable
+  def principal(env: Env, t: Term): (TypedTerm, Type, Subst) = {
+    assert(env.reverse.zipWithIndex forall { case (TyVar(tv), i) => tv == i; case _ => false })
+    assert(env.size <= MaxNesting)
+    t match {
+      case Var(v) =>
+        (TypedVar(v), env(v), Subst.identity)
+      case Abs(t) =>
+        val paramTv = env.size
+        val tpeS = TyVar(paramTv)
+        val (tt, tpeT, ut) = principal(tpeS :: env, t)
+        val tpeS_unif = ut(tpeS)
+        (TypedAbs(tpeS_unif, tt), Arrow(tpeS_unif, tpeT), ut drop paramTv)
+      case App(t1, t2) =>
+        val (tt1, tpe1, ut1base) = principal(env, t1)
+        val (tt2, tpe2, ut2base) = principal(env, t2)
+        val tpeS = freshTv()
+        val tpeT = freshTv()
+        val ut1abs = unifier(tpe1, Arrow(tpeS, tpeT))
+        val ut2arg = unifier(tpe2, tpeS)
+        val ut1 = ut1base compose ut1abs
+        val ut2 = ut2base compose ut2arg
+        val ut = merge(ut1, ut2)
+        (TypedApp(tt1, tt2), ut(tpeT), ut)
     }
+  }
 
   def maybeInfer(t: Term): Option[(TypedTerm, Type)] =
-    scala.util.Try(infer(Nil, 1, t, TyVar(0))).toOption.map { case (_, _, tt, tpe) => (tt, tpe) }
+    scala.util.Try(principal(Nil, t)).toOption.map { case (tt, tpe, ut) => (tt, tpe) }
 
   def computeType(env: Env, tt: TypedTerm): Option[Type] =
     tt match {
@@ -253,48 +296,9 @@ object Lambda {
     //   runOne("closed lambda terms", n, closed_lambda_terms)
     // }
     {
-      val badTerm = closed_lambda_terms(4)(31)
-      val (env, nextTv, tt, tpe) = infer(Nil, 1, badTerm, TyVar(0))
-      println(s"BADTERM: ${badTerm.show}\n\t$env\n\t$nextTv\n\t$tt\n\t${tpe.show()}")
+      val badTerm = closed_lambda_terms(2)(2)
+      val (tt, tpe, ut) = principal(Nil, badTerm)
+      println(s"BADTERM: ${badTerm.show}\n\t$tt\n\t${tpe.show()}\n\t${_nextTv}\n\t$ut")
     }
   }
-
-
-  // import org.scalameter.api._
-  // import org.scalameter.picklers.Implicits._
-
-  // object Benchmark extends Bench[Double] {
-  //   implicit val order = Ordering.Double.IeeeOrdering
-  //   lazy val executor = LocalExecutor(
-  //     new Executor.Warmer.Default,
-  //     Aggregator.min[Double],
-  //     measurer)
-  //   lazy val measurer = new Measurer.Default
-  //   lazy val reporter = Reporter.Composite(
-  //     new RegressionReporter(
-  //       RegressionReporter.Tester.Accepter(),
-  //       RegressionReporter.Historian.ExponentialBackoff()),
-  //     HtmlReporter(true)
-  //   )
-  //   lazy val persistor = new GZIPJSONSerializationPersistor("target/results")
-
-  //   val sizes18 = Gen.range("size")(1, 34, 1)
-  //   val sizes15 = Gen.range("size")(1, 15, 1)
-  //   val gen = upto(exact_unsorted)(_, _)
-
-  //   performance of "Unsorted bit-strings up to N" in {
-  //     measure method "count" config (
-  //       exec.minWarmupRuns -> 100,
-  //       exec.maxWarmupRuns -> 100,
-  //       exec.benchRuns -> 50
-  //     ) in {
-  //       def run = using(sizes18) in { s => gen(s, 0 until 2).size }
-  //       measure method "naive" in run
-  //     }
-
-  //     // measure method "enumerate" in {
-  //     //   using(sizes15) in { s => gen(s, 0 until 2).iterator.foreach(_ => ()) }
-  //     // }
-  //   }
-  // }
 }
