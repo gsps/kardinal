@@ -1,5 +1,7 @@
 package kardinal.core
 
+import scala.collection.mutable.{Map => MutableMap}
+
 // == First-order enumerators ==
 
 sealed trait Enum[T] extends EnumOps[T] {
@@ -126,8 +128,11 @@ case class Bind[V, T](e: Enum[V], ed: Depend[V, T]) extends Enum[T] {
 
 // == Dependent enumerators ==
 
+// TODO: Make factories for Depend[V, T] take an explicit flag denoting cacheability
 trait Depend[V, T] {
-  def apply(v: V): Enum[T]
+  private val cache: MutableMap[V, Enum[T]] = MutableMap.empty
+  protected def compute(v: V): Enum[T]
+  def apply(v: V): Enum[T] = cache.getOrElseUpdate(v, compute(v))
   def innerEnumsHaveDefiniteSizes: Boolean
 }
 
@@ -141,14 +146,14 @@ case class DLift[V, T](
     innerEnumsHaveDefiniteSizes: Boolean,
     f: V => Enum[T]
 ) extends Depend[V, T] {
-  def apply(v: V): Enum[T] = f(v)
+  protected def compute(v: V): Enum[T] = f(v)
 }
 
 case class DRec[V, T](
     innerEnumsHaveDefiniteSizes: Boolean,
     f: (V, Depend[V, T]) => Enum[T]
 ) extends Depend[V, T] {
-  def apply(v: V): Enum[T] = f(v, this)
+  protected def compute(v: V): Enum[T] = f(v, this)
 }
 
 // == Atomic first-order enumerators ==
