@@ -20,7 +20,7 @@ object Lambda {
           case _      => t1.show
         }
         val right = t2 match {
-          case App(_, _) => s"${t2.show}"
+          case App(_, _) => s"(${t2.show})"
           case _         => t2.show
         }
         s"$left $right"
@@ -49,13 +49,19 @@ object Lambda {
   /* == Simply-typed lambda terms == */
 
   sealed trait TypedTerm
-  final case class TypedVar(i: VarIndex) extends TypedTerm
-  final case class TypedAbs(tpe: Type, t: TypedTerm) extends TypedTerm
-  final case class TypedApp(t1: TypedTerm, t2: TypedTerm) extends TypedTerm
+  final case class TypedVar(v: VarIndex) extends TypedTerm
+  final case class TypedAbs(tpe: Type, tt: TypedTerm) extends TypedTerm {
+    def copy(tpe: Type, tt: TypedTerm): TypedTerm =
+      if ((this.tpe ne tpe) || (this.tt ne tt)) TypedAbs(tpe, tt) else this
+  }
+  final case class TypedApp(tt1: TypedTerm, tt2: TypedTerm) extends TypedTerm {
+    def copy(tt1: TypedTerm, tt2: TypedTerm): TypedTerm =
+      if ((this.tt1 ne tt1) || (this.tt2 ne tt2)) TypedApp(tt1, tt2) else this
+  }
 
   type TyVarIndex = Int
   type Env = List[Type]
-  type InferResult = (Env, TyVarIndex, TypedTerm, Type)
+  type PrincipalResult = (TypedTerm, Type, Subst)
   object UnificationException extends Exception
 
   val MaxNesting = 16
@@ -153,32 +159,56 @@ object Lambda {
       case _                 => false
     }
 
-  // TODO: Speed-up occurs check by caching?
-  def unifier(tpe1: Type, tpe2: Type): Subst =
-    (tpe1, tpe2) match {
-      case (TyVar(tv1), TyVar(tv2)) if tv1 == tv2 =>
-        Subst.identity
-      case (tpe1, TyVar(tv2)) =>
-        if (occurs(tv2, tpe1)) throw UnificationException else Subst.singleton(tv2, tpe1)
-      case (TyVar(tv1), tpe2) =>
-        if (occurs(tv1, tpe2)) throw UnificationException else Subst.singleton(tv1, tpe2)
-      case (Arrow(tpe1S, tpe1T), tpe2 @ Arrow(tpe2S, tpe2T)) =>
-        unifier(tpe1S, tpe2S) compose unifier(tpe1T, tpe2T)
-    }
+  // // TODO: Speed-up occurs check by caching?
+  // def unifier(tpe1: Type, tpe2: Type): Subst =
+  //   (tpe1, tpe2) match {
+  //     case (TyVar(tv1), TyVar(tv2)) if tv1 == tv2 =>
+  //       Subst.identity
+  //     case (tpe1, TyVar(tv2)) =>
+  //       if (occurs(tv2, tpe1)) throw UnificationException else Subst.singleton(tv2, tpe1)
+  //     case (TyVar(tv1), tpe2) =>
+  //       if (occurs(tv1, tpe2)) throw UnificationException else Subst.singleton(tv1, tpe2)
+  //     case (Arrow(tpe1S, tpe1T), tpe2 @ Arrow(tpe2S, tpe2T)) =>
+  //       unifier(tpe1S, tpe2S) compose unifier(tpe1T, tpe2T)
+  //   }
 
-  def merge(s1: Subst, s2: Subst): Subst =
-    (s1.pairs.keySet union s2.pairs.keySet).foldLeft(s1) {
-      case (s, tv) => unifier(s1(tv), s2(tv)) compose s
+  type Constraints = List[(Type, Type)]
+  def unifier(cs: Constraints): Subst = {
+    def substConstraints(s: Subst, cs: Constraints): Constraints =
+      cs.map { case (tpe1, tpe2) => (s(tpe1), s(tpe2)) }
+    def doSubst(cs: Constraints, tv: TyVarIndex, tpe: Type): Subst =
+      if (occurs(tv, tpe)) {
+        throw UnificationException
+      } else {
+        val s = Subst.singleton(tv, tpe)
+        unifier(substConstraints(s, cs)) compose s
+      }
+    cs match {
+      case Nil => Subst.identity
+      case (c @ (tpe1, tpe2)) :: cs =>
+        c match {
+          case (TyVar(tv1), TyVar(tv2)) if tv1 == tv2 => unifier(cs)
+          case (tpe1, TyVar(tv2)) => doSubst(cs, tv2, tpe1)
+          case (TyVar(tv1), tpe2) => doSubst(cs, tv1, tpe2)
+          case (Arrow(tpe1S, tpe1T), tpe2 @ Arrow(tpe2S, tpe2T)) =>
+            unifier((tpe1S, tpe2S) :: (tpe1T, tpe2T) :: cs)
+        }
     }
+  }
+
+  // def merge(s1: Subst, s2: Subst): Subst =
+  //   (s1.pairs.keySet union s2.pairs.keySet).foldLeft(s1) {
+  //     case (s, tv) => unifier(s(s1(tv)), s(s2(tv))) compose s
+  //   }
 
   private var debugDepth: Int = 1
   private def debugPre: String = "  " * debugDepth
-  private def debug(msg: String)(f: => InferResult): InferResult = {
-    println(msg)
+  private def debug(msg: String)(f: => PrincipalResult): PrincipalResult = {
+    print(debugPre); println(msg)
     debugDepth += 1
-    val res @ (env, nextTv, _, tpe) = f
+    val res @ (_, tpe, ut) = f
     debugDepth -= 1
-    println(s"$debugPre╚════ $env  |-($nextTv)  _  :  $tpe\n")
+    println(s"$debugPre╚════ $tpe  /  $ut\n")
     res
   }
 
@@ -189,37 +219,72 @@ object Lambda {
     t
   }
 
-  // // `n` is the number of free variables, the implicit environment is one where each variable
-  // // has as its type `TyVar(i)` where `i` corresponds to the relative depth of its binding.
-  // Note that `env` is simple here, in the sense that each variable is of a distinct type variable
-  def principal(env: Env, t: Term): (TypedTerm, Type, Subst) = {
-    assert(env.reverse.zipWithIndex forall { case (TyVar(tv), i) => tv == i; case _ => false })
-    assert(env.size <= MaxNesting)
-    t match {
-      case Var(v) =>
-        (TypedVar(v), env(v), Subst.identity)
-      case Abs(t) =>
-        val paramTv = env.size
-        val tpeS = TyVar(paramTv)
-        val (tt, tpeT, ut) = principal(tpeS :: env, t)
-        val tpeS_unif = ut(tpeS)
-        (TypedAbs(tpeS_unif, tt), Arrow(tpeS_unif, tpeT), ut drop paramTv)
-      case App(t1, t2) =>
-        val (tt1, tpe1, ut1base) = principal(env, t1)
-        val (tt2, tpe2, ut2base) = principal(env, t2)
-        val tpeS = freshTv()
-        val tpeT = freshTv()
-        val ut1abs = unifier(tpe1, Arrow(tpeS, tpeT))
-        val ut2arg = unifier(tpe2, tpeS)
-        val ut1 = ut1base compose ut1abs
-        val ut2 = ut2base compose ut2arg
-        val ut = merge(ut1, ut2)
-        (TypedApp(tt1, tt2), ut(tpeT), ut)
+  // FIXME: Shallow version sufficient for some use cases?
+  def typeSubst(s: Subst, tt: TypedTerm): TypedTerm =
+    tt match {
+      case tt @ TypedAbs(tpe, tt1) => tt.copy(s(tpe), typeSubst(s, tt1))
+      case tt @ TypedApp(tt1, tt2) => tt.copy(typeSubst(s, tt1), typeSubst(s, tt2))
+      case _ => tt
     }
-  }
 
-  def maybeInfer(t: Term): Option[(TypedTerm, Type)] =
-    scala.util.Try(principal(Nil, t)).toOption.map { case (tt, tpe, ut) => (tt, tpe) }
+  // // // `n` is the number of free variables, the implicit environment is one where each variable
+  // // // has as its type `TyVar(i)` where `i` corresponds to the relative depth of its binding.
+  // // Note that `env` is simple here, in the sense that each variable is of a distinct type variable
+  // def principal(env: Env, t: Term): PrincipalResult =
+  //   // debug(s"Principal  $env  |-  ${t.show}  :  ?")
+  //   {
+  //     // assert(env.reverse.zipWithIndex forall { case (TyVar(tv), i) => tv == i; case _ => false })
+  //     // assert(env.size <= MaxNesting)
+  //     t match {
+  //       case Var(v) =>
+  //         (TypedVar(v), env(v), Subst.identity)
+  //       case Abs(t) =>
+  //         // val paramTv = env.size
+  //         // val tpeS = TyVar(paramTv)
+  //         val tpeS = freshTv()
+  //         val (tt, tpeT, ut) = principal(tpeS :: env, t)
+  //         val tpeS_unif = ut(tpeS)
+  //         (TypedAbs(tpeS_unif, tt), Arrow(tpeS_unif, tpeT), ut /*drop paramTv*/)
+  //       case App(t1, t2) =>
+  //         val (tt1, tpe1, ut1base) = principal(env, t1)
+  //         val (tt2, tpe2, ut2base) = principal(env, t2)
+  //         val tpeS = freshTv()
+  //         val tpeT = freshTv()
+  //         val ut1abs = unifier(tpe1, Arrow(tpeS, tpeT))
+  //         val ut2arg = unifier(ut1abs(tpe2), ut1abs(tpeS)) // !!!
+  //         // println(s"ut2arg:  $ut2arg")
+  //         val ut1 = ut1abs compose ut1base
+  //         val ut2 = ut2arg compose ut2base
+  //         val ut = merge(ut1, ut2)
+  //         val tt = TypedApp(typeSubst(ut, tt1), typeSubst(ut, tt2))
+  //         (tt, ut(tpeT), ut)
+  //     }
+  //   }
+
+  // def maybeInfer(t: Term): Option[(TypedTerm, Type)] =
+  //   scala.util.Try(principal(Nil, t)).toOption.map { case (tt, tpe, ut) => (tt, tpe) }
+
+  def constraints(env: Env, t: Term): (TypedTerm, Type, Constraints) =
+    {
+      t match {
+        case Var(v) =>
+          (TypedVar(v), env(v), Nil)
+        case Abs(t) =>
+          val tpeS = freshTv()
+          val (tt, tpeT, cst) = constraints(tpeS :: env, t)
+          (TypedAbs(tpeS, tt), Arrow(tpeS, tpeT), cst)
+        case App(t1, t2) =>
+          val (tt1, tpe1, cst1) = constraints(env, t1)
+          val (tt2, tpeS, cst2) = constraints(env, t2)
+          val tpeT = freshTv()
+          (TypedApp(tt1, tt2), tpeT, (tpe1, Arrow(tpeS, tpeT)) :: cst1 ::: cst2)
+      }
+    }
+
+  def maybeInfer(t: Term, env: Env = Nil): Option[(TypedTerm, Type)] = {
+    val (tt, tpe, cs) = constraints(env, t)
+    scala.util.Try(unifier(cs)).toOption.map { s => (typeSubst(s, tt), s(tpe)) }
+  }
 
   def computeType(env: Env, tt: TypedTerm): Option[Type] =
     tt match {
@@ -248,14 +313,15 @@ object Lambda {
           val apps: Enum[Term] = (0 to sizeRest) flatMapFinite (
               sizeLeft => self((sizeLeft, maxIndex)) * self((sizeRest - sizeLeft, maxIndex))
           ) map App.tupled
-          abss + apps
+          val env: Env = (maxIndex - 1 to 0 by -1).map(TyVar).toList
+          (abss + apps).filter(maybeInfer(_, env).isDefined)
         }
     }.apply((s, 0))
 
   /* == Entrypoint == */
 
   def demo(): Unit = {
-    val N: Int = 4
+    val N: Int = 9
 
     val PrettyPrint: Boolean = true
     val CBad: String = Console.RED
@@ -274,31 +340,38 @@ object Lambda {
           val optTpe = maybeInfer(term) match {
             case Some((tt, tpe)) =>
               if (!checkType(tt, tpe))
-                println(s"UHOH: $tt  :/  $tpe")
+                println(s"($index) UHOH: $tt  :/  $tpe")
               Some(tpe)
             case None =>
               numIlltyped += 1
               None
           }
-          if (PrettyPrint) {
-            val indexStr = "%03d".format(index)
-            if (optTpe.isEmpty) println(s"$CBad  $indexStr:  ${term.show}  :  XXX$CReset")
-            else println(s"$CGood  $indexStr:  ${term.show}  :  ${optTpe.get.show()}$CReset")
-          } else {
-            println(s"  - $term  :  ${optTpe.getOrElse("XXX").toString}")
-          }
+          // if (PrettyPrint) {
+          //   val indexStr = "%03d".format(index)
+          //   if (optTpe.isEmpty) println(s"$CBad  $indexStr:  ${term.show}  :  XXX$CReset")
+          //   else println(s"$CGood  $indexStr:  ${term.show}  :  ${optTpe.get.show()}$CReset")
+          // } else {
+          //   println(s"  - $term  :  ${optTpe.getOrElse("XXX").toString}")
+          // }
       }
       println(s"  => # well-typed: ${numTerms - numIlltyped}")
       println("")
     }
 
-    // (1 to N) foreach { n =>
-    //   runOne("closed lambda terms", n, closed_lambda_terms)
-    // }
-    {
-      val badTerm = closed_lambda_terms(2)(2)
-      val (tt, tpe, ut) = principal(Nil, badTerm)
-      println(s"BADTERM: ${badTerm.show}\n\t$tt\n\t${tpe.show()}\n\t${_nextTv}\n\t$ut")
+    (1 to N) foreach { n =>
+      runOne("closed lambda terms", n, closed_typed_lambda_terms)
     }
+    // {
+    //   val badTerm = closed_lambda_terms(5)(213)
+    //   val (tt, tpe, cs) = constraints(Nil, badTerm)
+    //   val ut = unifier(cs)
+    //   println(s"BADTERM: ${badTerm.show}\n\t${typeSubst(ut, tt)}\n\t$tpe\n\t${ut(tpe).show()}\n\t${_nextTv}\n\t$ut")
+    //   // cs.foreach { case (tpe1, tpe2) => println(s"  - $tpe1   =   $tpe2") }
+    // }
+    // {
+    //   val badTerm = closed_lambda_terms(5)(213)
+    //   val (tt, tpe, ut) = principal(Nil, badTerm)
+    //   println(s"BADTERM: ${badTerm.show}\n\t$tt\n\t${tpe.show()}\n\t${_nextTv}\n\t$ut")
+    // }
   }
 }

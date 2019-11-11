@@ -93,7 +93,19 @@ case class Map[S, T](e: Enum[S], f: S => T) extends Enum[T] {
   def indexTree(index: Index): IndexTree = e.indexTree(index)
 }
 
-// case class Filter[T](e: Enum[T], f: T => Boolean) extends Enum[T]
+case class Filter[T](e: Enum[T], f: T => Boolean) extends Enum[T] {
+  lazy val values: Vector[T] = e.iterator.filter(f).toVector // FIXME
+
+  def apply(index: Index): T =
+    if (index < values.size)
+      values(index.toInt)
+    else
+      throw EnumerationException(this, index)
+  def hasDefiniteSize = e.hasDefiniteSize // TODO: Allow restrictions?
+  lazy val size = e.iterator.count(f)
+
+  def indexTree(index: Index): IndexTree = ???
+}
 
 case class Bind[V, T](e: Enum[V], ed: Depend[V, T]) extends Enum[T] {
   // def innerSizesIterator: Iterator[Size] = e.iterator.map(ed.apply(_).size)
@@ -183,7 +195,7 @@ trait EnumOps[T1] { self: Enum[T1] =>
   def +(e2: Enum[T1]): Enum[T1] = Sum(this, e2)
   def *[T2](e2: Enum[T2]): Enum[(T1, T2)] = Product(this, e2)
   def map[U](f: T1 => U): Enum[U] = Map(this, f)
-  // def filter(f: T1 => Boolean): Enum[T1] = Filter(this, f)
+  def filter(f: T1 => Boolean): Enum[T1] = Filter(this, f)
   def bind[U](ed: Depend[T1, U]): Enum[U] = Bind(this, ed)
   def flatMapFinite[U](f: T1 => Enum[U]): Enum[U] = Bind(this, dsl.lift(true)(f))
 }
