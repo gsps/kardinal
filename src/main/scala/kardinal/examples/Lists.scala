@@ -6,7 +6,7 @@ import kardinal.core.dsl._
 object Lists {
   // Unsorted lists of length `s`
   def exact_unsorted(s: Int, range: Range): Enum[List[Int]] =
-    rec[Int, List[Int]](true) { case (size, self) =>
+    rec[Int, List[Int]] { case (size, self) =>
       if (size == 0)
         Nil
       else
@@ -15,18 +15,18 @@ object Lists {
 
   // Sorted lists of size `s`
   def exact_sorted(s: Int, r: Range): Enum[List[Int]] =
-    rec[(Int, Range), List[Int]](true) { case ((size, range), self) =>
+    rec[(Int, Range), List[Int]] { case ((size, range), self) =>
       if (size == 0)
         Nil
       else
-        range flatMapFinite (v =>
-          v * self((size - 1, v+1 until range.end))
+        range flatMapEnum (v =>
+          enumFromSingleton(v) * self((size - 1, v+1 until range.end))
         ) map { case (v, tail) => v :: tail }
     } .apply(s, r)
 
   // All lists of size up to `s`
   def upto(f: (Int, Range) => Enum[List[Int]])(s: Int, range: Range): Enum[List[Int]] =
-    (0 to s) flatMapFinite (f(_, range))
+    (0 to s) flatMapEnum (f(_, range))
 
   def demo(): Unit = {
     val N: Int = 15

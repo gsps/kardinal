@@ -12,8 +12,7 @@ trait Pairing {
 object SumPairing {
   // 2nd component = index into 1st-component-th enum
   def apply[T](e1: Enum[T], e2: Enum[T]): Pairing = {
-    // TODO: Try to swap e1 and e2, if only the latter is finite
-    if (e1.hasDefiniteSize) Linear2(e1.size) else DivMod2(2)
+    Linear2(e1.size)
   }
 }
 
@@ -21,8 +20,7 @@ object ProductPairing {
   // 1st component = index into 1st enum
   // 2nd component = index into 2nd enum
   def apply[T1, T2](e1: Enum[T1], e2: Enum[T2]): Pairing = {
-    // TODO: Try to swap e1 and e2, if only the latter is finite?
-    if (e1.hasDefiniteSize) DivMod2(e1.size) else Szudzik2
+    DivMod2(e1.size)
   }
 }
 

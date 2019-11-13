@@ -32,14 +32,14 @@ object Lambda {
 
   // All closed lambda terms of size `s`, counting variables as 0-sized.
   def closed_lambda_terms(s: TermSize): Enum[Term] =
-    rec[(TermSize, VarIndex), Term](true) {
+    rec[(TermSize, VarIndex), Term] {
       case ((size, maxIndex), self) =>
         if (size == 0) {
           enumFromRange(0 until maxIndex) map Var
         } else {
           val sizeRest = size - 1
           val abss: Enum[Term] = self((sizeRest, maxIndex + 1)) map Abs
-          val apps: Enum[Term] = (0 to sizeRest) flatMapFinite (
+          val apps: Enum[Term] = (0 to sizeRest) flatMapEnum (
               sizeLeft => self((sizeLeft, maxIndex)) * self((sizeRest - sizeLeft, maxIndex))
           ) map App.tupled
           abss + apps
@@ -173,9 +173,11 @@ object Lambda {
   //   }
 
   type Constraints = List[(Type, Type)]
-  def unifier(cs: Constraints): Subst = {
-    def substConstraints(s: Subst, cs: Constraints): Constraints =
-      cs.map { case (tpe1, tpe2) => (s(tpe1), s(tpe2)) }
+
+  def substConstraints(s: Subst, cs: Constraints): Constraints =
+    cs.map { case (tpe1, tpe2) => (s(tpe1), s(tpe2)) }
+
+  def unifier(cs: Constraints): Subst = timed {
     def doSubst(cs: Constraints, tv: TyVarIndex, tpe: Type): Subst =
       if (occurs(tv, tpe)) {
         throw UnificationException
@@ -200,6 +202,18 @@ object Lambda {
   //   (s1.pairs.keySet union s2.pairs.keySet).foldLeft(s1) {
   //     case (s, tv) => unifier(s(s1(tv)), s(s2(tv))) compose s
   //   }
+
+  private var timedAcc: Long = 0
+  private var timedInv: Long = 0
+  private def timed[T](t: => T): T = {
+    val tStart: Long = System.nanoTime()
+    try { t }
+    finally {
+      val v = System.nanoTime() - tStart
+      timedAcc += v
+      timedInv += 1
+    }
+  }
 
   private var debugDepth: Int = 1
   private def debugPre: String = "  " * debugDepth
@@ -303,25 +317,61 @@ object Lambda {
 
   // All closed simply-typed lambda terms of size `s`, counting variables as 0-sized.
   def closed_typed_lambda_terms(s: TermSize): Enum[Term] =
-    rec[(TermSize, VarIndex), Term](true) {
+    rec[(TermSize, VarIndex), Term] {
       case ((size, maxIndex), self) =>
         if (size == 0) {
           enumFromRange(0 until maxIndex) map Var
         } else {
           val sizeRest = size - 1
           val abss: Enum[Term] = self((sizeRest, maxIndex + 1)) map Abs
-          val apps: Enum[Term] = (0 to sizeRest) flatMapFinite (
+          val apps: Enum[Term] = (0 to sizeRest) flatMapEnum (
               sizeLeft => self((sizeLeft, maxIndex)) * self((sizeRest - sizeLeft, maxIndex))
           ) map App.tupled
           val env: Env = (maxIndex - 1 to 0 by -1).map(TyVar).toList
-          (abss + apps).filter(maybeInfer(_, env).isDefined)
+          abss + apps.filter(maybeInfer(_, env).isDefined)
         }
     }.apply((s, 0))
+
+  def closed_typed_lambda_terms_interleaved(s: TermSize): Enum[Term] = {
+    type Result = (Term, Type, Constraints)
+
+    def freshenResult(maxIndex: VarIndex, res: Result): (Type, Constraints) = {
+      def countAbs(t: Term, n: Int = 0): Int = t match {
+        case Abs(t) => countAbs(t, n + 1)
+        case _ => n
+      }
+      val (t, tpe, cs) = res
+      val numShallowAbs = countAbs(t)
+      val s = Subst((-(maxIndex + numShallowAbs) to -maxIndex).map(tv => tv -> freshTv()).toMap)
+      (s(tpe), substConstraints(s, cs))
+    }
+
+    rec[(TermSize, VarIndex), Result] {
+      case ((size, maxIndex), self) =>
+        if (size == 0) {
+          enumFromRange(0 until maxIndex) map { v => (Var(v), TyVar(-(maxIndex - 1 - v)), Nil) }
+        } else {
+          val sizeRest = size - 1
+          val abss: Enum[Result] = self((sizeRest, maxIndex + 1)) map { case (t, tpeT, cs) =>
+            (Abs(t), Arrow(TyVar(-maxIndex), tpeT), cs)
+          }
+          val apps: Enum[Result] = (0 to sizeRest) flatMapEnum (
+              sizeLeft => self((sizeLeft, maxIndex)) * self((sizeRest - sizeLeft, maxIndex))
+          ) map { case (res1 @ (t1, _, _), res2 @ (t2, _, _)) =>
+            val (tpe1, cs1) = freshenResult(maxIndex, res1)
+            val (tpeS, cs2) = freshenResult(maxIndex, res2)
+            val tpeT = freshTv()
+            (App(t1, t2), tpeT, (tpe1, Arrow(tpeS, tpeT)) :: cs1 ::: cs2)
+          }
+          (abss + apps).filter(res => scala.util.Try(unifier(res._3)).isSuccess)
+        }
+    }.apply((s, 0)).map(_._1)
+  }
 
   /* == Entrypoint == */
 
   def demo(): Unit = {
-    val N: Int = 9
+    val N: Int = 10
 
     val PrettyPrint: Boolean = true
     val CBad: String = Console.RED
@@ -335,25 +385,25 @@ object Lambda {
       println(s"# of $name of size $n: $numTerms")
       // terms.iterator.foreach(term => println(s"  - $term"))
       var numIlltyped = 0
-      terms.iterator.zipWithIndex foreach {
-        case (term, index) =>
-          val optTpe = maybeInfer(term) match {
-            case Some((tt, tpe)) =>
-              if (!checkType(tt, tpe))
-                println(s"($index) UHOH: $tt  :/  $tpe")
-              Some(tpe)
-            case None =>
-              numIlltyped += 1
-              None
-          }
-          // if (PrettyPrint) {
-          //   val indexStr = "%03d".format(index)
-          //   if (optTpe.isEmpty) println(s"$CBad  $indexStr:  ${term.show}  :  XXX$CReset")
-          //   else println(s"$CGood  $indexStr:  ${term.show}  :  ${optTpe.get.show()}$CReset")
-          // } else {
-          //   println(s"  - $term  :  ${optTpe.getOrElse("XXX").toString}")
-          // }
-      }
+      // terms.iterator.zipWithIndex foreach {
+      //   case (term, index) =>
+      //     val optTpe = maybeInfer(term) match {
+      //       case Some((tt, tpe)) =>
+      //         if (!checkType(tt, tpe))
+      //           println(s"($index) UHOH: $tt  :/  $tpe")
+      //         Some(tpe)
+      //       case None =>
+      //         numIlltyped += 1
+      //         None
+      //     }
+      //     // if (PrettyPrint) {
+      //     //   val indexStr = "%03d".format(index)
+      //     //   if (optTpe.isEmpty) println(s"$CBad  $indexStr:  ${term.show}  :  XXX$CReset")
+      //     //   else println(s"$CGood  $indexStr:  ${term.show}  :  ${optTpe.get.show()}$CReset")
+      //     // } else {
+      //     //   println(s"  - $term  :  ${optTpe.getOrElse("XXX").toString}")
+      //     // }
+      // }
       println(s"  => # well-typed: ${numTerms - numIlltyped}")
       println("")
     }
@@ -361,6 +411,7 @@ object Lambda {
     (1 to N) foreach { n =>
       runOne("closed lambda terms", n, closed_typed_lambda_terms)
     }
+    println(s"timedInv: $timedInv, timedAcc: ${timedAcc / 1000000}")
     // {
     //   val badTerm = closed_lambda_terms(5)(213)
     //   val (tt, tpe, cs) = constraints(Nil, badTerm)
