@@ -323,10 +323,11 @@ object Lambda {
     var tvs: ArrayBuffer[TyVarIndex] = new ArrayBuffer(MaxNesting)
     def traverse(tpe: Type): Unit =
       tpe match {
-        case TyVar(tv) if !seen(tv) => seen += tv; tvs.append(tv)
+        case TyVar(tv) => if (!seen(tv)) { seen += tv; tvs.append(tv) }
         case Arrow(tpe1, tpe2) => traverse(tpe1); traverse(tpe2)
       }
-    Subst(tvs.map(tv => tv -> freshTv()).toMap)
+    traverse(tpe)
+    Subst(tvs.zipWithIndex.map { case (tv, i) => tv -> TyVar(-(i + 1)) }.toMap)
   }
 
 
@@ -391,10 +392,12 @@ object Lambda {
     def inc(): Unit = _count += 1
 
     override def equals(other: Any) = other match {
-      case other: Canonical => env == other.env && t == other.t && tpe == other.tpe
+      case other: Canonical => env == other.env /*&& t == other.t*/ && tpe == other.tpe
+      // case other: Canonical => env.toSet == other.env.toSet /*&& t == other.t*/ && tpe == other.tpe
       case _ => false
     }
-    private val _hashCode: Int = (env, t, tpe).hashCode()
+    private val _hashCode: Int = (env, /*t,*/ tpe).hashCode()
+    // private val _hashCode: Int = (env.toSet, /*t,*/ tpe).hashCode()
     override def hashCode(): Int = _hashCode
   }
   type Canonicals = MutableMap[Canonical, Canonical]
@@ -433,7 +436,7 @@ object Lambda {
           val env: Env = stdEnv(maxIndex)
           (abss + apps).filter { t =>
             maybeInfer(t, env).map { case (env, _, tpe) =>
-              val canonS = canonicalizer(tpe)
+              val canonS = canonicalizer(env.foldRight(tpe)(Arrow)) // HACK to canonicalize over all vars
               recordSeen(key, env.map(canonS.apply), t, canonS(tpe))
             }.isDefined
           }
@@ -475,27 +478,37 @@ object Lambda {
       //     // }
       // }
       // println(s"  => # well-typed: ${numTerms - numIlltyped}")
-      println(s"  => # all wt tms:         ${seenTerms.size}")
-      println(s"  => # canonicals compact: ${seenCanon.values.map(_.size).sum}")
-      println(s"  => # canonicals flatten: ${seenCanon.values.map(_.keysIterator.map(_.count).sum).sum}")
+      println(s"  => # canonicals grouped:    ${seenCanon.values.map(_.size).sum}")
+      println(s"  => # canonicals flat:       ${seenCanon.values.map(_.keysIterator.map(_.count).sum).sum}")
+      println(s"  => # distinct wt tms total: ${seenTerms.size}")
       seenCanon.keys.toSeq.sorted.foreach { case key =>
         println(s"  [ $key ]:")
         seenCanon(key).keys.toSeq.map { case c =>
           val env = c.env.reverse
           val tpe = c.tpe
-          val names = (env.foldRight(tpe)(Arrow)).makeNames()
+          // val names = (env.foldRight(tpe)(Arrow)).makeNames()
+          def binderNames(tpe: Type, pre: String): Map[TyVarIndex, String] =
+            tpe match {
+              case TyVar(tv) => Map(tv -> pre)
+              case Arrow(tpe1, tpe2) => binderNames(tpe1, pre + "1") ++ binderNames(tpe2, pre + "2")
+            }
+          val names = (
+            // (0 until MaxNesting).map(v => v -> ('A' + v).toChar.toString) ++
+            // (0 until 2*MaxNesting).map(v => -(v + 1) -> ('α' + v).toChar.toString)
+            (0 until 2*MaxNesting).map(v => -(v + 1) -> ('α' + v).toChar.toString) ++
+            env.zipWithIndex.map { case (tpe, v) => binderNames(tpe, ('A' + v).toChar.toString) } .reverse.flatten
+          ).toMap
           val envStr = env.map(_.show(names)).mkString(", ")
-          // s"   ${"%3d".format(c.count)}x  $envStr  ⊢  ${tpe.show(names)}"
-          s"   ${"%3d".format(c.count)}x  $env  ⊢  ${tpe}"
+          s"   ${"%3d".format(c.count)}x  ${" " * (32-envStr.length)}$envStr  ⊢  ${tpe.show(names)}"
+          // s"   ${"%3d".format(c.count)}x  $env  ⊢  ${tpe}"
         } .sorted.foreach(println)
       }
-      seenTerms.clear()
-      seenCanon.clear()
+      seenTerms.clear(); seenCanon.clear()
       println("")
     }
 
     (1 to N) foreach { n =>
-      runOne("closed lambda terms", n, closed_typed_lambda_terms_canonicalized)
+      runOne("well-typed closed lambda terms", n, closed_typed_lambda_terms_canonicalized)
     }
     println(s"timedInv: $timedInv, timedAcc: ${timedAcc / 1000000}")
     // {

@@ -98,18 +98,19 @@ case class Map[S : ClassTag, T : ClassTag](e: Enum[S], f: S => T) extends Enum[T
 }
 
 case class Filter[T : ClassTag](e: Enum[T], f: T => Boolean) extends Enum[T] {
-  lazy val values: Array[T] = e.iterator.filter(f).toArray
+  // lazy val values: Array[T] = e.iterator.filter(f).toArray
 
   def apply(index: Index): T =
-    if (index < values.size)
-      values(index.toInt)
-    else
-      throw EnumerationException(this, index)
+    // if (index < values.size)
+    //   values(index.toInt)
+    // else
+    //   throw EnumerationException(this, index)
+    ???
   lazy val size = e.iterator.count(f)
 
   def indexTree(index: Index): IndexTree = ???
 
-  def iterator = values.iterator
+  def iterator = e.iterator.filter(f)
 }
 
 case class Bind[V : ClassTag, T : ClassTag](e: Enum[V], ed: Depend[V, T]) extends Enum[T] {
@@ -141,7 +142,7 @@ case class Cached[T : ClassTag](e: Enum[T]) extends Enum[T] {
       values(index.toInt)
     else
       throw EnumerationException(this, index)
-  lazy val size = e.iterator.size
+  lazy val size = values.size
 
   def indexTree(index: Index): IndexTree = ???
 
