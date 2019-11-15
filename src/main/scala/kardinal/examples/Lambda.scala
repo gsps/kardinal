@@ -3,6 +3,8 @@ package kardinal.examples
 import kardinal.core.{Map => _, _}
 import kardinal.core.dsl._
 
+import scala.collection.mutable.{ArrayBuffer, HashMap => MutableMap, HashSet => MutableSet}
+
 object Lambda {
 
   /* == Untyped lambda terms == */
@@ -68,7 +70,7 @@ object Lambda {
 
   sealed trait Type {
     import scala.collection.immutable.Map
-    private def makeNames(): Map[TyVarIndex, String] = {
+    def makeNames(): Map[TyVarIndex, String] = {
       def indices(tpe: Type): Set[TyVarIndex] = tpe match {
         case TyVar(v)          => Set(v)
         case Arrow(tpe1, tpe2) => indices(tpe1) ++ indices(tpe2)
@@ -295,9 +297,9 @@ object Lambda {
       }
     }
 
-  def maybeInfer(t: Term, env: Env = Nil): Option[(TypedTerm, Type)] = {
+  def maybeInfer(t: Term, env: Env = Nil): Option[(Env, TypedTerm, Type)] = {
     val (tt, tpe, cs) = constraints(env, t)
-    scala.util.Try(unifier(cs)).toOption.map { s => (typeSubst(s, tt), s(tpe)) }
+    scala.util.Try(unifier(cs)).toOption.map { s => (env.map(s.apply), typeSubst(s, tt), s(tpe)) }
   }
 
   def computeType(env: Env, tt: TypedTerm): Option[Type] =
@@ -314,6 +316,19 @@ object Lambda {
 
   def checkType(tt: TypedTerm, tpe: Type): Boolean =
     computeType(Nil, tt).map(_ == tpe).getOrElse(false)
+
+
+  def canonicalizer(tpe: Type): Subst = {
+    val seen: MutableSet[TyVarIndex] = MutableSet.empty
+    var tvs: ArrayBuffer[TyVarIndex] = new ArrayBuffer(MaxNesting)
+    def traverse(tpe: Type): Unit =
+      tpe match {
+        case TyVar(tv) if !seen(tv) => seen += tv; tvs.append(tv)
+        case Arrow(tpe1, tpe2) => traverse(tpe1); traverse(tpe2)
+      }
+    Subst(tvs.map(tv => tv -> freshTv()).toMap)
+  }
+
 
   // All closed simply-typed lambda terms of size `s`, counting variables as 0-sized.
   def closed_typed_lambda_terms(s: TermSize): Enum[Term] =
@@ -368,10 +383,67 @@ object Lambda {
     }.apply((s, 0)).map(_._1)
   }
 
+  // Third try.
+  type Key = (TermSize, VarIndex)
+  class Canonical(val env: Env, val t: Term, val tpe: Type) {
+    private var _count: Int = 0
+    def count: Int = _count
+    def inc(): Unit = _count += 1
+
+    override def equals(other: Any) = other match {
+      case other: Canonical => env == other.env && t == other.t && tpe == other.tpe
+      case _ => false
+    }
+    private val _hashCode: Int = (env, t, tpe).hashCode()
+    override def hashCode(): Int = _hashCode
+  }
+  type Canonicals = MutableMap[Canonical, Canonical]
+
+  private val seenTerms: MutableSet[Term] = MutableSet.empty
+  private val seenCanon: MutableMap[Key, Canonicals] = MutableMap.empty
+  private def recordSeen(key: Key, env: Env, t: Term, tpe: Type): Unit = {
+    seenTerms.add(t)
+    val c = new Canonical(env, t, tpe)
+    val cs = seenCanon.getOrElseUpdate(key, MutableMap.empty)
+    cs.getOrElseUpdate(c, c).inc()
+  }
+
+  private val _stdEnvTyVar: MutableMap[VarIndex, TyVar] = MutableMap.empty
+  private def stdEnvTyVar(maxIndex: TyVarIndex, v: VarIndex): TyVar =
+    _stdEnvTyVar.getOrElseUpdate(maxIndex - 1 - v, { TyVar(maxIndex - 1 - v) })
+  private val _stdEnv: MutableMap[TyVarIndex, Env] = MutableMap.empty
+  private def stdEnv(maxIndex: TyVarIndex): Env =
+    _stdEnv.getOrElseUpdate(maxIndex, (maxIndex - 1 to 0 by -1).map(TyVar).toList)
+
+  def closed_typed_lambda_terms_canonicalized(s: TermSize): Enum[Term] =
+    rec[Key, Term] {
+      case (key @ (size, maxIndex), self) =>
+        if (size == 0) {
+          enumFromRange(0 until maxIndex) map { v =>
+            val t = Var(v)
+            recordSeen(key, stdEnv(maxIndex), t, stdEnvTyVar(maxIndex, v))
+            t
+          }
+        } else {
+          val sizeRest = size - 1
+          val abss: Enum[Term] = self((sizeRest, maxIndex + 1)) map Abs
+          val apps: Enum[Term] = (0 to sizeRest) flatMapEnum (
+              sizeLeft => self((sizeLeft, maxIndex)) * self((sizeRest - sizeLeft, maxIndex))
+          ) map App.tupled
+          val env: Env = stdEnv(maxIndex)
+          (abss + apps).filter { t =>
+            maybeInfer(t, env).map { case (env, _, tpe) =>
+              val canonS = canonicalizer(tpe)
+              recordSeen(key, env.map(canonS.apply), t, canonS(tpe))
+            }.isDefined
+          }
+        }
+    }.apply((s, 0))
+
   /* == Entrypoint == */
 
   def demo(): Unit = {
-    val N: Int = 10
+    val N: Int = 4
 
     val PrettyPrint: Boolean = true
     val CBad: String = Console.RED
@@ -381,10 +453,8 @@ object Lambda {
     def runOne(name: String, n: Int, gen: Int => Enum[Term]): Unit = {
       val terms = gen(n)
       val numTerms = terms.size
-      // println(s" == $name ==")
       println(s"# of $name of size $n: $numTerms")
-      // terms.iterator.foreach(term => println(s"  - $term"))
-      var numIlltyped = 0
+      // var numIlltyped = 0
       // terms.iterator.zipWithIndex foreach {
       //   case (term, index) =>
       //     val optTpe = maybeInfer(term) match {
@@ -404,12 +474,28 @@ object Lambda {
       //     //   println(s"  - $term  :  ${optTpe.getOrElse("XXX").toString}")
       //     // }
       // }
-      println(s"  => # well-typed: ${numTerms - numIlltyped}")
+      // println(s"  => # well-typed: ${numTerms - numIlltyped}")
+      println(s"  => # all wt tms:         ${seenTerms.size}")
+      println(s"  => # canonicals compact: ${seenCanon.values.map(_.size).sum}")
+      println(s"  => # canonicals flatten: ${seenCanon.values.map(_.keysIterator.map(_.count).sum).sum}")
+      seenCanon.keys.toSeq.sorted.foreach { case key =>
+        println(s"  [ $key ]:")
+        seenCanon(key).keys.toSeq.map { case c =>
+          val env = c.env.reverse
+          val tpe = c.tpe
+          val names = (env.foldRight(tpe)(Arrow)).makeNames()
+          val envStr = env.map(_.show(names)).mkString(", ")
+          // s"   ${"%3d".format(c.count)}x  $envStr  ⊢  ${tpe.show(names)}"
+          s"   ${"%3d".format(c.count)}x  $env  ⊢  ${tpe}"
+        } .sorted.foreach(println)
+      }
+      seenTerms.clear()
+      seenCanon.clear()
       println("")
     }
 
     (1 to N) foreach { n =>
-      runOne("closed lambda terms", n, closed_typed_lambda_terms)
+      runOne("closed lambda terms", n, closed_typed_lambda_terms_canonicalized)
     }
     println(s"timedInv: $timedInv, timedAcc: ${timedAcc / 1000000}")
     // {

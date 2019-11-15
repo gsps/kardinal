@@ -133,13 +133,29 @@ case class Bind[V : ClassTag, T : ClassTag](e: Enum[V], ed: Depend[V, T]) extend
   def iterator = e.iterator.flatMap(ed.apply(_).iterator)
 }
 
+case class Cached[T : ClassTag](e: Enum[T]) extends Enum[T] {
+  lazy val values: Array[T] = e.iterator.toArray
+
+  def apply(index: Index): T =
+    if (index < values.size)
+      values(index.toInt)
+    else
+      throw EnumerationException(this, index)
+  lazy val size = e.iterator.size
+
+  def indexTree(index: Index): IndexTree = ???
+
+  def iterator = values.iterator
+}
+
 // == Dependent enumerators ==
 
 // TODO: Make factories for Depend[V, T] take an explicit flag denoting cacheability
-trait Depend[V, T] {
+abstract class Depend[V, T : ClassTag] {
   private val cache: MutableMap[V, Enum[T]] = MutableMap.empty
   protected def compute(v: V): Enum[T]
-  def apply(v: V): Enum[T] = cache.getOrElseUpdate(v, compute(v))
+  // def apply(v: V): Enum[T] = cache.getOrElseUpdate(v, compute(v))
+  def apply(v: V): Enum[T] = cache.getOrElseUpdate(v, Cached(compute(v)))
 }
 
 // case class DSum[V, T](ed1: Depend[V, T], ed2: Depend[V, T]) extends Depend[V, T]
@@ -148,11 +164,11 @@ trait Depend[V, T] {
 
 // case class DMap[V, W, T](ed: Depend[W, T], f: V => W) extends Depend[V, T]
 
-case class DLift[V, T](f: V => Enum[T]) extends Depend[V, T] {
+case class DLift[V, T : ClassTag](f: V => Enum[T]) extends Depend[V, T] {
   protected def compute(v: V): Enum[T] = f(v)
 }
 
-case class DRec[V, T](f: (V, Depend[V, T]) => Enum[T]) extends Depend[V, T] {
+case class DRec[V, T : ClassTag](f: (V, Depend[V, T]) => Enum[T]) extends Depend[V, T] {
   protected def compute(v: V): Enum[T] = f(v, this)
 }
 
@@ -197,9 +213,9 @@ abstract class EnumOps[T1 : ClassTag] { self: Enum[T1] =>
 // }
 
 object dsl {
-  def lift[V, T](f: V => Enum[T]): Depend[V, T] =
+  def lift[V, T : ClassTag](f: V => Enum[T]): Depend[V, T] =
     DLift(f)
-  def rec[V, T](f: (V, Depend[V, T]) => Enum[T]): Depend[V, T] =
+  def rec[V, T : ClassTag](f: (V, Depend[V, T]) => Enum[T]): Depend[V, T] =
     DRec(f)
 
   implicit def enumFromSingleton[T : ClassTag](value: T): Enum[T] = SingletonAtomicEnum(value)
